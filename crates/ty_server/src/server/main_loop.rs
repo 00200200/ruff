@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use lsp_server::Message;
 use lsp_types::Notification;
 use lsp_types::Uri;
+use ruff_db::files::File;
 use ruff_db::system::SystemPathBuf;
 
 pub(crate) type ConnectionSender = crossbeam::channel::Sender<Message>;
@@ -141,6 +142,25 @@ impl Server {
 
                     Action::SendRequest(request) => client.send_request_raw(&self.session, request),
 
+                    Action::EnablePlaceLoadRecording {
+                        revision,
+                        files,
+                        request,
+                    } => {
+                        if self
+                            .session
+                            .request_queue()
+                            .incoming()
+                            .is_pending(&request.id)
+                        {
+                            self.session.enable_place_load_recording(revision, files);
+                            // A stale revision leaves recording unchanged. Retrying still matters:
+                            // the handler must rediscover candidates in the current workspace set.
+                            let task = api::request(request);
+                            scheduler.dispatch(task, &mut self.session, client);
+                        }
+                    }
+
                     Action::SuspendWorkspaceDiagnostics(suspended_request) => {
                         self.session.set_suspended_workspace_diagnostics_request(
                             *suspended_request,
@@ -206,6 +226,16 @@ pub(crate) enum Action {
 
     /// Retry a request that previously failed due to a salsa cancellation.
     RetryRequest(lsp_server::Request),
+
+    /// Enables recording on the main thread, then retries the waiting request.
+    EnablePlaceLoadRecording {
+        /// The session revision in which the project indices and file handles were discovered.
+        revision: u64,
+        /// Project indices and files discovered in the same session snapshot.
+        files: Vec<(usize, Vec<File>)>,
+        /// The request to retry, including its original request identifier.
+        request: lsp_server::Request,
+    },
 
     /// Send a request from the server to the client.
     SendRequest(SendRequest),
