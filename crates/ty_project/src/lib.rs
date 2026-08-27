@@ -634,6 +634,24 @@ impl Project {
         self.set_open_fileset(db).to(open_files);
     }
 
+    /// Enables recording of name loads the next time the selected files are inferred.
+    ///
+    /// The database must permit recording; construct a [`ProjectDatabase`] with
+    /// [`ProjectDatabase::with_place_load_recording`]. Otherwise this request has no effect.
+    ///
+    /// This does not run inference. Call it before creating database snapshots or semantic models
+    /// for the operation. The selection persists across requests and source edits. Selecting a new
+    /// file invalidates inference that ran without recording; selecting an already enabled file
+    /// does not change the database.
+    #[allow(dead_code, reason = "recording is exposed for IDE consumers")]
+    pub fn enable_place_load_recording(
+        self,
+        db: &mut dyn Db,
+        files: impl IntoIterator<Item = File>,
+    ) {
+        ty_python_semantic::enable_place_load_recording(db, files);
+    }
+
     /// Permanently marks the project as never having open files, so reads of the
     /// open-file state record no salsa dependency. Any later write panics.
     fn freeze_open_files(self, db: &mut dyn Db) {
