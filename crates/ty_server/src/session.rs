@@ -462,7 +462,8 @@ impl Session {
     /// Returns a reference to the project's [`ProjectDatabase`] in which the given `path` belongs.
     ///
     /// If the path is a system path, it will return the project database that is closest to the
-    /// given path, or the first project if no project is found for the path.
+    /// given path, then one whose search paths contain it, then the first project when sorted by
+    /// workspace folder path.
     ///
     /// If the path is a virtual path, it will return the first project database in the session.
     pub(crate) fn project_db(&self, path: &AnySystemPath) -> &ProjectDatabase {
@@ -490,7 +491,8 @@ impl Session {
     /// Returns a reference to the project's [`ProjectState`] in which the given `path` belongs.
     ///
     /// If the path is a system path, it will return the project database that is closest to the
-    /// given path, or the first project if no project is found for the path.
+    /// given path, then one whose search paths contain it, then the first project when sorted by
+    /// workspace folder path.
     ///
     /// If the path is a virtual path, it will return the first project database in the session.
     fn project_state(&self, path: &AnySystemPath) -> &ProjectState {
@@ -516,7 +518,8 @@ impl Session {
     /// Selects the workspace whose project and editor settings serve the document.
     ///
     /// If no workspace matches, e.g., for a virtual file (such as a new, unsaved file) or
-    /// a file outside all workspace folders, selects the project with the lexicographically first
+    /// a file outside all workspace folders and all projects' import search paths,
+    /// selects the project with the lexicographically first
     /// workspace-folder path. Returns `None` when no projects exist.
     fn workspace_root_for_document(&self, path: &AnySystemPath) -> Option<&SystemPath> {
         path.as_system()
@@ -526,10 +529,18 @@ impl Session {
 
     /// Returns the root of the most deeply nested workspace that contains the path
     /// and has a project.
+    ///
+    /// If none matches, returns the workspace root of a project whose import search
+    /// paths contain the path.
     fn matching_workspace_root_for_path(&self, path: &SystemPath) -> Option<&SystemPath> {
         self.projects
             .range(..=path.to_path_buf())
             .rfind(|(workspace_root, _)| path.starts_with(workspace_root))
+            .or_else(|| {
+                self.projects
+                    .iter()
+                    .find(|(_, project)| project.db.program_for_dependency(path).is_some())
+            })
             .map(|(root, _)| root.as_path())
     }
 

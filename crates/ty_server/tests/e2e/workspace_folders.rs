@@ -1,9 +1,9 @@
 use anyhow::Result;
 use insta::assert_snapshot;
 use lsp_types::{
-    DiagnosticSeverity, DocumentDiagnosticReport, FullDocumentDiagnosticReport, Message, Position,
-    RegistrationRequest, UnregistrationRequest, WorkspaceDiagnosticReport,
-    WorkspaceDocumentDiagnosticReport,
+    Contents, DiagnosticSeverity, DocumentDiagnosticReport, FullDocumentDiagnosticReport, Message,
+    Position, RegistrationRequest, TextDocumentContentChangeEvent, UnregistrationRequest,
+    WorkspaceDiagnosticReport, WorkspaceDocumentDiagnosticReport,
 };
 use ruff_db::system::SystemPath;
 use ruff_python_trivia::textwrap::dedent;
@@ -644,6 +644,177 @@ include = ["only_external.py"]
     Ok(())
 }
 
+#[test]
+fn external_file_uses_project_with_matching_search_paths_for_requests_and_changes() {
+    let path = SystemPath::new("shared/library.py");
+    let source = "\
+from project_value import value
+value
+";
+    let mut server = TestServerBuilder::new()
+        .expect("create test server builder")
+        .with_workspace(SystemPath::new("api"), None)
+        .expect("register api workspace")
+        .with_workspace(SystemPath::new("web/src"), None)
+        .expect("register web workspace")
+        .with_files([
+            (
+                "web/ty.toml",
+                r#"[environment]
+extra-paths = ["../shared"]
+"#,
+            ),
+            ("api/project_value.py", "value = 'api'"),
+            ("web/src/project_value.py", "value = 'web'"),
+            (path.as_str(), source),
+        ])
+        .expect("write project files")
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    server.open_text_document(path, source, 1);
+    assert_hover(&mut server, path, Position::new(1, 0), "Literal[\"web\"]");
+
+    server.change_text_document(
+        path,
+        vec![
+            TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                lsp_types::TextDocumentContentChangeWholeDocument {
+                    text: "\
+value = 'edited'
+value
+"
+                    .into(),
+                },
+            ),
+        ],
+        2,
+    );
+    assert_hover(
+        &mut server,
+        path,
+        Position::new(1, 0),
+        "Literal[\"edited\"]",
+    );
+}
+
+#[test]
+fn external_file_respects_matching_project_editor_settings() {
+    let path = SystemPath::new("shared/library.py");
+    let source = "value = 42";
+    let mut server = TestServerBuilder::new()
+        .expect("create test server builder")
+        .with_workspace(SystemPath::new("api"), None)
+        .expect("register api workspace")
+        .with_workspace(
+            SystemPath::new("web/src"),
+            Some(ClientOptions::default().with_disable_language_services(true)),
+        )
+        .expect("register web workspace")
+        .with_files([
+            (
+                "web/ty.toml",
+                r#"[environment]
+extra-paths = ["../shared"]
+"#,
+            ),
+            (path.as_str(), source),
+        ])
+        .expect("write project files")
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    server.open_text_document(path, source, 1);
+    assert!(server.hover_request(path, Position::new(0, 0)).is_none());
+}
+
+#[test]
+fn containing_project_takes_precedence_over_import_search_paths() {
+    let path = SystemPath::new("library/module.py");
+    let source = "\
+from project_value import value
+value
+";
+    let mut server = TestServerBuilder::new()
+        .expect("create test server builder")
+        .with_workspace(SystemPath::new("app"), None)
+        .expect("register app workspace")
+        .with_workspace(SystemPath::new("library"), None)
+        .expect("register library workspace")
+        .with_files([
+            (
+                "app/ty.toml",
+                r#"[environment]
+extra-paths = ["../library", "imports"]
+"#,
+            ),
+            (
+                "library/ty.toml",
+                r#"[environment]
+extra-paths = ["imports"]
+"#,
+            ),
+            ("app/imports/project_value.py", "value = 'app'"),
+            ("library/imports/project_value.py", "value = 'library'"),
+            (path.as_str(), source),
+        ])
+        .expect("write project files")
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    // The file is in library's workspace folder and on app's import search path.
+    server.open_text_document(path, source, 1);
+    assert_hover(
+        &mut server,
+        path,
+        Position::new(1, 0),
+        "Literal[\"library\"]",
+    );
+}
+
+#[test]
+fn shared_search_paths_select_project_by_root_order() {
+    let path = SystemPath::new("shared/library.py");
+    let source = "\
+from project_value import value
+value
+";
+    // api sorts first but cannot import the file. Of the matching projects, web is registered
+    // first, but tools sorts first and should be selected.
+    let mut server = TestServerBuilder::new()
+        .expect("create test server builder")
+        .with_workspace(SystemPath::new("web"), None)
+        .expect("register web workspace")
+        .with_workspace(SystemPath::new("tools"), None)
+        .expect("register tools workspace")
+        .with_workspace(SystemPath::new("api"), None)
+        .expect("register api workspace")
+        .with_files([
+            (
+                "web/ty.toml",
+                r#"[environment]
+extra-paths = ["../shared"]
+"#,
+            ),
+            (
+                "tools/ty.toml",
+                r#"[environment]
+extra-paths = ["../shared"]
+"#,
+            ),
+            ("api/project_value.py", "value = 'api'"),
+            ("tools/project_value.py", "value = 'tools'"),
+            ("web/project_value.py", "value = 'web'"),
+            (path.as_str(), source),
+        ])
+        .expect("write project files")
+        .build()
+        .wait_until_workspaces_are_initialized();
+
+    server.open_text_document(path, source, 1);
+    assert_hover(&mut server, path, Position::new(1, 0), "Literal[\"tools\"]");
+}
+
 /// Test that workspace folders cannot realistically have different
 /// global settings.
 ///
@@ -897,4 +1068,14 @@ fn get_expected_empty_workspace_diagnostics_and_shutdown(
     let request_id = send_workspace_diagnostic_request(&mut server);
     assert_workspace_diagnostics_suspends_for_long_polling(&mut server, &request_id);
     shutdown_and_await_workspace_diagnostic(server, &request_id)
+}
+
+fn assert_hover(server: &mut TestServer, path: &SystemPath, position: Position, expected: &str) {
+    let hover = server
+        .hover_request(path, position)
+        .expect("hover response");
+    let Contents::MarkupContent(markup) = hover.contents else {
+        panic!("expected markup");
+    };
+    assert_eq!(markup.value, expected);
 }
