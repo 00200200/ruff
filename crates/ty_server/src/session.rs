@@ -494,12 +494,10 @@ impl Session {
     ///
     /// If the path is a virtual path, it will return the first project database in the session.
     fn project_state(&self, path: &AnySystemPath) -> &ProjectState {
-        match path {
-            AnySystemPath::System(system_path) => self
-                .project_state_for_path(system_path)
-                .unwrap_or_else(|| self.project_state_virtual_fallback()),
-            AnySystemPath::SystemVirtual(_virtual_path) => self.project_state_virtual_fallback(),
-        }
+        let workspace_root = self
+            .workspace_root_for_document(path)
+            .expect("To always have at least one project");
+        &self.projects[workspace_root]
     }
 
     /// Returns a mutable reference to the project's [`ProjectState`] in which the given `path`
@@ -509,58 +507,30 @@ impl Session {
     ///
     /// [`project_db`]: Session::project_db
     pub(crate) fn project_state_mut(&mut self, path: &AnySystemPath) -> &mut ProjectState {
-        match path {
-            AnySystemPath::System(system_path) => {
-                let range = ..=system_path.to_path_buf();
-
-                // Using `range` here to work around a borrow checker limitation
-                // where it can't prove that the `range_mut` call and the `self.projects.values_mut`
-                // never borrow `self.projects` mutably at the same time.
-                // https://rust-lang.github.io/rfcs/2094-nll.html#problem-case-3-conditional-control-flow-across-functions
-                if self
-                    .projects
-                    .range(range.clone())
-                    .any(|(workspace_root, _)| system_path.starts_with(workspace_root))
-                {
-                    return self
-                        .projects
-                        .range_mut(range)
-                        .rfind(|(workspace_root, _)| system_path.starts_with(workspace_root))
-                        .unwrap()
-                        .1;
-                }
-
-                self.project_state_virtual_fallback_mut()
-            }
-            AnySystemPath::SystemVirtual(_virtual_path) => {
-                self.project_state_virtual_fallback_mut()
-            }
-        }
-    }
-
-    /// Returns a reference to the project's [`ProjectState`] corresponding to the given path, if
-    /// any.
-    fn project_state_for_path(&self, path: impl AsRef<SystemPath>) -> Option<&ProjectState> {
-        let path = path.as_ref();
-        self.projects
-            .range(..=path.to_path_buf())
-            .rfind(|(workspace_root, _)| path.starts_with(workspace_root))
-            .map(|(_, project)| project)
-    }
-
-    // TODO: While ty supports multiple workspace folders, we still
-    // need to figure out which project should this virtual path
-    // belong to: https://github.com/astral-sh/ty/issues/794 (e.g.
-    // look for the first project with an overlapping search path?)
-    fn project_state_virtual_fallback(&self) -> &ProjectState {
-        self.projects
-            .values()
-            .next()
+        self.workspace_root_for_document(path)
+            .map(SystemPath::to_path_buf)
+            .and_then(|root| self.projects.get_mut(&root))
             .expect("To always have at least one project")
     }
 
-    fn project_state_virtual_fallback_mut(&mut self) -> &mut ProjectState {
-        self.projects.values_mut().next().unwrap()
+    /// Selects the workspace whose project and editor settings serve the document.
+    ///
+    /// If no workspace matches, e.g., for a virtual file (such as a new, unsaved file) or
+    /// a file outside all workspace folders, selects the project with the lexicographically first
+    /// workspace-folder path. Returns `None` when no projects exist.
+    fn workspace_root_for_document(&self, path: &AnySystemPath) -> Option<&SystemPath> {
+        path.as_system()
+            .and_then(|path| self.matching_workspace_root_for_path(path))
+            .or_else(|| self.projects.keys().next().map(SystemPathBuf::as_path))
+    }
+
+    /// Returns the root of the most deeply nested workspace that contains the path
+    /// and has a project.
+    fn matching_workspace_root_for_path(&self, path: &SystemPath) -> Option<&SystemPath> {
+        self.projects
+            .range(..=path.to_path_buf())
+            .rfind(|(workspace_root, _)| path.starts_with(workspace_root))
+            .map(|(root, _)| root.as_path())
     }
 
     pub(crate) fn apply_changes(
@@ -1236,28 +1206,13 @@ impl Session {
             resolved_client_capabilities: self.resolved_client_capabilities,
             global_settings: self.global_settings.clone(),
             workspace_settings: self
-                .workspace_settings_for_document(document_handle.notebook_or_file_path())
+                .workspace_root_for_document(document_handle.notebook_or_file_path())
+                .and_then(|root| self.workspaces.settings_for_path(root))
                 .unwrap_or_else(|| Arc::new(WorkspaceSettings::default())),
             position_encoding: self.position_encoding,
             document: document_handle,
             client_name: self.client_name,
         })
-    }
-
-    fn workspace_settings_for_document(
-        &self,
-        path: &AnySystemPath,
-    ) -> Option<Arc<WorkspaceSettings>> {
-        // Virtual documents use the same "owner" heuristic as `project_state`.
-        match path {
-            AnySystemPath::System(system_path) => self.workspaces.settings_for_path(system_path),
-            AnySystemPath::SystemVirtual(_) => {
-                let project = self.project_state(path);
-                self.workspaces
-                    .settings_for_path(project.db.project().root(&project.db))
-                    .or_else(|| self.workspaces.settings_virtual_fallback())
-            }
-        }
     }
 
     /// Creates a snapshot of the current state of the [`Session`].
@@ -1722,10 +1677,6 @@ impl Workspaces {
     /// workspace registered for the path.
     fn settings_for_path(&self, path: impl AsRef<SystemPath>) -> Option<Arc<WorkspaceSettings>> {
         self.for_path(path).map(Workspace::settings_arc)
-    }
-
-    fn settings_virtual_fallback(&self) -> Option<Arc<WorkspaceSettings>> {
-        self.workspaces.values().next().map(Workspace::settings_arc)
     }
 
     /// Returns `true` if all workspaces have been [initialized].
