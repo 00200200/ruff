@@ -347,31 +347,28 @@ impl<'db> SolutionWalker<'db> {
             match constraint {
                 Constraint::ConcreteLower(lower) => {
                     let bounds = mappings.entry(lower.typevar).or_default();
-                    bounds.add_lower(db, env, lower.provenance, lower.bound);
+                    bounds.add_constraint(db, env, lower.typevar, constraint);
                 }
                 Constraint::ConcreteUpper(upper) => {
                     let bounds = mappings.entry(upper.typevar).or_default();
-                    bounds.add_upper(db, env, upper.provenance, upper.bound);
+                    bounds.add_constraint(db, env, upper.typevar, constraint);
                 }
                 Constraint::ConcreteEquivalence(equivalence) => {
                     let bounds = mappings.entry(equivalence.typevar).or_default();
-                    bounds.add_lower(db, env, equivalence.provenance, equivalence.bound);
-                    bounds.add_upper(db, env, equivalence.provenance, equivalence.bound);
+                    bounds.add_constraint(db, env, equivalence.typevar, constraint);
                 }
                 Constraint::TypeVarRange(bound) => {
                     let bounds = mappings.entry(bound.left).or_default();
-                    bounds.add_upper(db, env, bound.provenance, Type::TypeVar(bound.right));
+                    bounds.add_constraint(db, env, bound.left, constraint);
                     let bounds = mappings.entry(bound.right).or_default();
-                    bounds.add_lower(db, env, bound.provenance, Type::TypeVar(bound.left));
+                    bounds.add_constraint(db, env, bound.right, constraint);
                 }
                 Constraint::TypeVarEquivalence(bound) => {
                     let (left, right) = bound.in_builder(db, storage);
                     let bounds = mappings.entry(left).or_default();
-                    bounds.add_lower(db, env, bound.provenance, Type::TypeVar(right));
-                    bounds.add_upper(db, env, bound.provenance, Type::TypeVar(right));
+                    bounds.add_constraint(db, env, left, constraint);
                     let bounds = mappings.entry(right).or_default();
-                    bounds.add_lower(db, env, bound.provenance, Type::TypeVar(left));
-                    bounds.add_upper(db, env, bound.provenance, Type::TypeVar(left));
+                    bounds.add_constraint(db, env, right, constraint);
                 }
             }
         }
