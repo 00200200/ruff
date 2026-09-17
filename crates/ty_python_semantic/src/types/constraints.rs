@@ -3154,9 +3154,21 @@ impl<'db> PathBound<'db> {
         }
     }
 
+    /// Allows tests to construct conflicting bounds that relation construction would reject.
+    #[cfg(test)]
+    pub(crate) fn with_upper_evidence(mut self, upper: Type<'db>) -> Self {
+        self.upper = UpperBound::from_clause(upper);
+        self
+    }
+
     /// Returns lower-bound inference evidence without supplying a default for a missing bound.
     pub(crate) fn evidence_lower(&self) -> Option<Type<'db>> {
         self.evidence_lower
+    }
+
+    /// Returns upper-bound inference evidence without including validity requirements.
+    pub(crate) fn iter_upper_evidence(&self) -> impl Iterator<Item = Type<'db>> + Clone + '_ {
+        self.upper.iter_evidence()
     }
 
     /// Returns one effective upper bound without expanding factored intersections.
@@ -4593,7 +4605,7 @@ impl<'db> Solution<'db> {
         matches!(self.validity, SolutionValidity::Valid)
     }
 
-    pub(crate) fn violations(&self) -> &[SolutionViolation<'db>] {
+    fn violations(&self) -> &[SolutionViolation<'db>] {
         match &self.validity {
             SolutionValidity::Valid => &[],
             SolutionValidity::Invalid(violations) => violations,
