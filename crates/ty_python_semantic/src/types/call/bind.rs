@@ -34,8 +34,8 @@ use crate::types::ProgramEnvironment;
 use crate::types::call::arguments::{CallArgumentTypes, Expansion, is_expandable_type};
 use crate::types::callable::CallableTypeKind;
 use crate::types::constraints::{
-    CandidateSolutions, CandidateTypeVarSolution, ConstraintSet, ConstraintSetBuilder,
-    PathBoundSolution, SolutionPaths, Solutions,
+    CandidateSolutions, CandidateTypeVarSolution, CandidateTypeVarSolutionKind, ConstraintSet,
+    ConstraintSetBuilder, PathBoundSolution, SolutionPaths, Solutions,
 };
 use crate::types::context::LintDiagnosticGuardBuilder;
 use crate::types::dedicated::pydantic::{self, ConfigBoolean};
@@ -6285,7 +6285,10 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             let preferred_ty = preferred_type_mappings.get(&typevar.identity(db)).copied();
 
             if let Some(bounds) = bounds {
-                let lower = bounds.evidence_lower()?;
+                let lower = match &bounds.kind {
+                    CandidateTypeVarSolutionKind::Range(range) => range.evidence_lower?,
+                    CandidateTypeVarSolutionKind::Exact(ty) => *ty,
+                };
                 if preferred_ty.is_none_or(|ty| !lower.is_assignable_to(db, self.env, ty)) {
                     return maybe_promote(typevar, bounds);
                 }

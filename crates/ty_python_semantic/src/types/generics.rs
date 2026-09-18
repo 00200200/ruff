@@ -4683,6 +4683,7 @@ impl<'db> SpecializationError<'db> {
 mod tests {
     use super::*;
 
+    use crate::types::constraints::CandidateTypeVarSolutionKind;
     use crate::types::constraints::resolution::SolutionType::{Resolved, Unresolved};
 
     use ruff_db::files::system_path_to_file;
@@ -4801,9 +4802,12 @@ mod tests {
 
                 let inference = builder
                     .build_inference_with(|typevar, bounds| {
-                        (typevar == t
-                            && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
-                        .then_some(PathBoundSolution::BudgetExceeded { fallback })
+                        let lower = bounds.as_ref().and_then(|bounds| match &bounds.kind {
+                            CandidateTypeVarSolutionKind::Range(range) => range.evidence_lower,
+                            CandidateTypeVarSolutionKind::Exact(ty) => Some(*ty),
+                        });
+                        (typevar == t && lower == Some(str))
+                            .then_some(PathBoundSolution::BudgetExceeded { fallback })
                     })
                     .map_err(|()| anyhow::anyhow!("incomplete alternatives remain satisfiable"))?;
                 let TypeVarInferenceSolutions::Incomplete(paths) = inference.solutions(db) else {
@@ -5068,7 +5072,11 @@ mod tests {
 
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                (typevar == t && bounds.is_some_and(|bound| bound.evidence_lower() == Some(str)))
+                let lower = bounds.as_ref().and_then(|bounds| match &bounds.kind {
+                    CandidateTypeVarSolutionKind::Range(range) => range.evidence_lower,
+                    CandidateTypeVarSolutionKind::Exact(ty) => Some(*ty),
+                });
+                (typevar == t && lower == Some(str))
                     .then_some(PathBoundSolution::Solved(Type::TypeVar(u)))
             })
             .map_err(|()| anyhow::anyhow!("expected satisfiable alternatives"))?;
@@ -5114,7 +5122,11 @@ mod tests {
         // individual path still contains the cycle after merging with object.
         let inference = builder
             .build_inference_with(|typevar, bounds| {
-                let ty = match (typevar, bounds?.evidence_lower()) {
+                let lower = match &bounds?.kind {
+                    CandidateTypeVarSolutionKind::Range(range) => range.evidence_lower,
+                    CandidateTypeVarSolutionKind::Exact(ty) => Some(*ty),
+                };
+                let ty = match (typevar, lower) {
                     (typevar, Some(lower)) if typevar == t && lower == int => list_of_u,
                     (typevar, Some(lower)) if typevar == u && lower == str => Type::TypeVar(t),
                     _ => Type::object(),
