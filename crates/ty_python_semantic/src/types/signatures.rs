@@ -1255,13 +1255,17 @@ impl<'db> Signature<'db> {
     /// Make an implicit receiver explicit when comparing it with a protocol's receiver domain.
     /// For example, a method declared on `C` cannot accept an unrelated `str` receiver.
     pub(super) fn with_explicit_receiver(&self, receiver_type: Type<'db>) -> Self {
+        if !self.has_implicit_positional_receiver_annotation() {
+            return self.clone();
+        }
+
         let parameters = self.parameters.with_transformed_parameters(
             self.parameters
                 .iter()
                 .cloned()
                 .enumerate()
                 .map(|(index, mut parameter)| {
-                    if index == 0 && parameter.is_positional() && parameter.inferred_annotation {
+                    if index == 0 {
                         parameter.annotated_type = receiver_type;
                         parameter.inferred_annotation = false;
                     }
