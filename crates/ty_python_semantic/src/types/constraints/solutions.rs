@@ -15,7 +15,7 @@ use crate::types::constraints::{
     SolutionViolation, SolutionViolationKind,
 };
 use crate::types::typevar::{TypeVarBoundOrConstraints, TypeVarConstraints};
-use crate::types::{BoundTypeVarInstance, Type};
+use crate::types::{BoundTypeVarIdentity, BoundTypeVarInstance, Type};
 use crate::{Db, FxIndexMap, FxIndexSet, ProgramEnvironment};
 
 type ProcessSatisfied<'a, 'db, L, B> = dyn FnMut(
@@ -28,6 +28,7 @@ type ProcessSatisfied<'a, 'db, L, B> = dyn FnMut(
 
 pub(super) struct SolutionWalker<'db> {
     source_orders: FxIndexSet<ConstraintId>,
+    declared_constraint_solutions: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>>,
 
     /// Candidate solutions for each satisfiable path in the BDD.
     ///
@@ -54,6 +55,7 @@ impl<'db> SolutionWalker<'db> {
     pub(super) fn new(source_orders: FxIndexSet<ConstraintId>) -> Self {
         Self {
             source_orders,
+            declared_constraint_solutions: FxHashMap::default(),
             pending: Vec::default(),
             _phantom: PhantomData,
         }
@@ -189,6 +191,21 @@ impl<'db> SolutionWalker<'db> {
                 ControlFlow::Continue(())
             },
         )
+    }
+
+    fn with_declared_constraint_solution<R>(
+        &mut self,
+        db: &'db dyn Db,
+        bound_typevar: BoundTypeVarInstance<'db>,
+        declared_constraint_solution: Type<'db>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let identity = bound_typevar.identity(db);
+        self.declared_constraint_solutions
+            .insert(identity, declared_constraint_solution);
+        let result = f(self);
+        self.declared_constraint_solutions.remove(&identity);
+        result
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -493,24 +510,31 @@ impl<'db> SolutionWalker<'db> {
         for declared_constraint in &constrained_typevar.declared_constraints {
             let start = self.pending.len();
             if let Some(constraints) = declared_constraint.constraints.as_deref() {
-                self.visit_constraints_and_then(
+                self.with_declared_constraint_solution(
                     db,
-                    env,
-                    storage,
-                    limits,
-                    path,
-                    constraints,
-                    &mut |this, storage, limits, path| {
-                        // The candidate solution satisfies this declared constraint, but we still
-                        // need to check any remaining constrained typevars.
-                        this.validate_constrained_and_then(
+                    bound_typevar,
+                    declared_constraint.constrained_ty,
+                    |this| {
+                        this.visit_constraints_and_then(
                             db,
                             env,
                             storage,
                             limits,
                             path,
-                            constrained,
-                            process_satisfied,
+                            constraints,
+                            &mut |this, storage, limits, path| {
+                                // The candidate solution satisfies this declared constraint, but we still
+                                // need to check any remaining constrained typevars.
+                                this.validate_constrained_and_then(
+                                    db,
+                                    env,
+                                    storage,
+                                    limits,
+                                    path,
+                                    constrained,
+                                    process_satisfied,
+                                )
+                            },
                         )
                     },
                 )?;
@@ -677,20 +701,34 @@ impl<'db> SolutionWalker<'db> {
         let typevars: Option<Box<[_]>> = mappings
             .into_iter()
             .map(|(bound_typevar, bounds)| {
-                let range = bounds.finish(db, env, storage)?;
+                let (solution, argument) = match self
+                    .declared_constraint_solutions
+                    .get(&bound_typevar.identity(db))
+                {
+                    Some(&ty) => {
+                        let solution = CandidateTypeVarSolution::exact(bound_typevar, ty);
+                        (solution, Some(ty))
+                    }
+                    None => {
+                        let range = bounds.finish(db, env, storage)?;
+                        let argument = range.evidence_lower;
+                        let solution = CandidateTypeVarSolution::range(bound_typevar, range);
+                        (solution, argument)
+                    }
+                };
 
                 if let Some(typevar_violations) = typevar_violations
                     && let Some(&kind) = typevar_violations.get(&bound_typevar)
                 {
                     violations.push(SolutionViolation {
                         bound_typevar,
-                        argument: range.evidence_lower,
-                        variance: range.variance(),
+                        argument,
+                        variance: solution.variance(),
                         kind,
                     });
                 }
 
-                Some(CandidateTypeVarSolution::range(bound_typevar, range))
+                Some(solution)
             })
             .collect();
         let typevars = typevars?;
