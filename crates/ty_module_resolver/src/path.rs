@@ -286,6 +286,13 @@ impl ModulePath {
     }
 }
 
+impl get_size2::GetSize for ModulePath {
+    fn get_heap_size_with_tracker<T: get_size2::GetSizeTracker>(&self, tracker: T) -> (usize, T) {
+        let (size, tracker) = self.search_path.get_heap_size_with_tracker(tracker);
+        (size + self.relative_path.capacity(), tracker)
+    }
+}
+
 impl PartialEq<SystemPathBuf> for ModulePath {
     fn eq(&self, other: &SystemPathBuf) -> bool {
         let ModulePath {

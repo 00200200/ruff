@@ -20,17 +20,19 @@ use std::rc::Rc;
 
 use itertools::Either;
 
+use crate::db::Db;
 use crate::module_name::ModuleName;
-use crate::path::{ModuleDirectory, SearchPath};
+use crate::path::{ModuleDirectory, ModulePath, SearchPath};
 
 use super::{
-    ComponentFileFilter, ModuleResolutionCandidate, ResolvedNames, ResolverContext,
-    StubPackageIndex, StubPackagePaths, normalize_candidates, resolve_component,
-    resolve_stub_package_in_search_path, search_paths, stub_package_index,
+    CandidatePrecedence, ComponentFileFilter, ModuleNameIngredient, ModuleResolutionCandidate,
+    PyTyped, ResolvedModule, ResolvedNames, ResolverContext, StubPackageIndex, StubPackagePaths,
+    normalize_candidates, resolve_component, resolve_stub_package_in_search_path, search_paths,
+    stub_package_index,
 };
 
 pub(super) struct ModuleSearchCursor<'a, 'db> {
-    context: &'a ResolverContext<'db>,
+    pub(super) context: &'a ResolverContext<'db>,
     position: Position<'db>,
 }
 
@@ -46,6 +48,43 @@ impl<'a, 'db> ModuleSearchCursor<'a, 'db> {
         search_paths: &'db [SearchPath],
     ) -> Self {
         Self::with_paths(context, RootSearchPaths::Supplied(search_paths))
+    }
+
+    /// Advances this search through all components of the given name.
+    pub(super) fn for_prefix(mut self, prefix: &ModuleName) -> Option<Self> {
+        match &self.position {
+            Position::Root(RootSearchPaths::Configured) => {
+                // The cache describes absolute names under the configured search paths,
+                // so a search starting at their root can restore the cached candidates.
+
+                let context = self.context;
+                let name = ModuleNameIngredient::new(
+                    context.db,
+                    prefix,
+                    context.mode,
+                    context.resolver_environment,
+                );
+                self.position =
+                    Position::Prefix(prefix_candidates(context.db, name)?.restore(context, prefix));
+            }
+            Position::Root(RootSearchPaths::Supplied(_)) => {
+                // Supplied paths are not part of the cache key. Walk them directly
+                // rather than restoring candidates from the configured search paths.
+                for component in prefix.components() {
+                    self = self.enter_package(component)?;
+                }
+            }
+            Position::Prefix(_) => {
+                // This name is relative to the current package: `tools` under `acme`
+                // means `acme.tools`. Advance the existing candidates; looking up `tools`
+                // in the cache would instead search for a top-level module.
+                for component in prefix.components() {
+                    self = self.enter_package(component)?;
+                }
+            }
+        }
+
+        Some(self)
     }
 
     fn with_paths(context: &'a ResolverContext<'db>, search_paths: RootSearchPaths<'db>) -> Self {
@@ -72,7 +111,7 @@ impl<'a, 'db> ModuleSearchCursor<'a, 'db> {
     /// For instance, when resolving the module `acme.tools.power`, this method
     /// should be called first with "acme", and then again with "tools" on the
     /// resulting object.
-    fn enter_package(&self, component_name: &str) -> Option<Self> {
+    pub(super) fn enter_package(&self, component_name: &str) -> Option<Self> {
         let resolver = match &self.position {
             Position::Root(paths) => PrefixResolver::new(self.context, paths, component_name)?,
             Position::Prefix(resolver) => resolver.enter_package(self.context, component_name)?,
@@ -88,7 +127,7 @@ impl<'a, 'db> ModuleSearchCursor<'a, 'db> {
     /// For instance, when resolving the module `acme.tools.power`, this method
     /// should be called with "power" after previous calls to [`ModuleSearchCursor::enter_package`]
     /// with "acme" and "tools".
-    fn resolve_child(&self, component_name: &str) -> Option<ResolvedNames<'db>> {
+    pub(super) fn resolve_child(&self, component_name: &str) -> Option<ResolvedNames<'db>> {
         match &self.position {
             Position::Root(paths) => {
                 let name = ModuleName::new(component_name)?;
@@ -99,13 +138,179 @@ impl<'a, 'db> ModuleSearchCursor<'a, 'db> {
         }
     }
 
-    #[cfg(test)]
-    fn full_module_name(&self, component_name: &str) -> Option<ModuleName> {
-        let prefix = match &self.position {
+    /// Returns resolution candidates that are still in play at this point in
+    /// the search.
+    ///
+    /// This returns an empty iterator if the search is positioned before
+    /// the first module name component (i.e. if the search has not progressed
+    /// past its initialization point).
+    pub(super) fn candidates(&self) -> impl Iterator<Item = &ModuleResolutionCandidate<'db>> {
+        match &self.position {
+            Position::Root(_) => Either::Left(std::iter::empty()),
+            Position::Prefix(resolver) => Either::Right(resolver.candidates(self.context)),
+        }
+    }
+
+    /// Returns the sole prefix candidate when there is no separate stub override search.
+    pub(super) fn single_candidate(&self) -> Option<&ModuleResolutionCandidate<'db>> {
+        let candidates = match &self.position {
+            Position::Prefix(PrefixResolver::Typing(resolver))
+                if resolver.stub_override_candidates.is_empty() =>
+            {
+                resolver.full_search_candidates(self.context)
+            }
+            Position::Prefix(PrefixResolver::Runtime(resolver)) => &resolver.candidates,
+            _ => return None,
+        };
+        let [candidate] = candidates.as_slice() else {
+            return None;
+        };
+        Some(candidate)
+    }
+
+    /// Appends a component name to this search's module name prefix.
+    pub(super) fn full_module_name(&self, component_name: &str) -> Option<ModuleName> {
+        full_module_name(self.prefix(), component_name)
+    }
+
+    /// Returns the module name prefix, or `None` before the first component.
+    pub(super) fn prefix(&self) -> Option<&ModuleName> {
+        match &self.position {
             Position::Root(_) => None,
             Position::Prefix(resolver) => Some(resolver.prefix()),
+        }
+    }
+
+    /// Returns the search paths before the first component, or none after entering a package.
+    pub(super) fn root_search_paths(&self) -> impl Iterator<Item = &'db SearchPath> {
+        let paths = match &self.position {
+            Position::Root(paths) => Some(paths),
+            Position::Prefix(_) => None,
         };
-        full_module_name(prefix, component_name)
+        paths.into_iter().flat_map(|paths| paths.iter(self.context))
+    }
+}
+
+/// Caches the package locations and resolution metadata used when searching beneath this name.
+///
+/// For example, enumerating `acme.tools` and `acme.reports` both requires finding the portions
+/// of `acme` across search paths and applying package and stub precedence. Both searches reuse
+/// the cached candidates for `acme` before advancing through their own final component.
+/// Callers then enumerate children by reading the directory contents at the candidate locations.
+#[salsa::tracked(returns(as_ref), heap_size=ruff_memory_usage::heap_size)]
+fn prefix_candidates<'db>(
+    db: &'db dyn Db,
+    name: ModuleNameIngredient<'db>,
+) -> Option<CachedPrefixCandidates> {
+    let context = ResolverContext::new(db, name.resolver_environment(db), name.mode(db));
+    let prefix = name.name(db);
+
+    let mut search = ModuleSearchCursor::with_configured_search_paths(&context);
+    if let Some(parent) = prefix.parent() {
+        search = search.for_prefix(&parent)?;
+    }
+    let search = search.enter_package(prefix.last_component())?;
+
+    match &search.position {
+        Position::Prefix(PrefixResolver::Typing(resolver)) => {
+            Some(CachedPrefixCandidates::Typing {
+                stub_override_candidates: resolver
+                    .stub_override_candidates
+                    .iter()
+                    .map(CachedCandidate::from)
+                    .collect(),
+                full_search_candidates: resolver
+                    .full_search_candidates(&context)
+                    .iter()
+                    .map(CachedCandidate::from)
+                    .collect(),
+            })
+        }
+        Position::Prefix(PrefixResolver::Runtime(resolver)) => {
+            Some(CachedPrefixCandidates::Runtime(
+                resolver
+                    .candidates
+                    .iter()
+                    .map(CachedCandidate::from)
+                    .collect(),
+            ))
+        }
+        Position::Root(_) => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, get_size2::GetSize)]
+enum CachedPrefixCandidates {
+    Typing {
+        stub_override_candidates: Box<[CachedCandidate]>,
+        full_search_candidates: Box<[CachedCandidate]>,
+    },
+    Runtime(Box<[CachedCandidate]>),
+}
+
+impl CachedPrefixCandidates {
+    fn restore<'db>(
+        &self,
+        context: &ResolverContext<'db>,
+        prefix: &ModuleName,
+    ) -> PrefixResolver<'db> {
+        let restore = |candidates: &[CachedCandidate]| {
+            candidates
+                .iter()
+                .map(|candidate| candidate.restore(context))
+                .collect()
+        };
+
+        match self {
+            Self::Typing {
+                stub_override_candidates,
+                full_search_candidates,
+            } => PrefixResolver::Typing(TypingModeResolver {
+                prefix: prefix.clone(),
+                root_candidates_from_extra_paths: None,
+                stub_override_candidates: restore(stub_override_candidates),
+                full_search_candidates: OnceCell::from(restore(full_search_candidates)),
+            }),
+            Self::Runtime(candidates) => PrefixResolver::Runtime(RuntimeModeResolver {
+                prefix: prefix.clone(),
+                candidates: restore(candidates),
+            }),
+        }
+    }
+}
+
+/// An owned candidate description without a borrowed directory listing.
+///
+/// Salsa cannot retain the database-lifetime reference in `ModuleDirectory` across revisions.
+/// Restoring the directory reads its current listing; changes to unrelated entries can leave
+/// this cached description unchanged.
+#[derive(Debug, PartialEq, Eq, get_size2::GetSize)]
+struct CachedCandidate {
+    path: ModulePath,
+    module: ResolvedModule,
+    py_typed: PyTyped,
+    precedence: CandidatePrecedence,
+}
+
+impl CachedCandidate {
+    fn restore<'db>(&self, context: &ResolverContext<'db>) -> ModuleResolutionCandidate<'db> {
+        ModuleResolutionCandidate {
+            directory: ModuleDirectory::new(context, self.path.clone()),
+            module: self.module,
+            py_typed: self.py_typed,
+            precedence: self.precedence,
+        }
+    }
+}
+
+impl From<&ModuleResolutionCandidate<'_>> for CachedCandidate {
+    fn from(candidate: &ModuleResolutionCandidate<'_>) -> Self {
+        Self {
+            path: candidate.directory.path().clone(),
+            module: candidate.module,
+            py_typed: candidate.py_typed,
+            precedence: candidate.precedence,
+        }
     }
 }
 
@@ -168,7 +373,16 @@ impl<'db> PrefixResolver<'db> {
         }
     }
 
-    #[cfg(test)]
+    fn candidates(
+        &self,
+        context: &ResolverContext<'db>,
+    ) -> impl Iterator<Item = &ModuleResolutionCandidate<'db>> {
+        match self {
+            Self::Typing(resolver) => Either::Left(resolver.candidates(context)),
+            Self::Runtime(resolver) => Either::Right(resolver.candidates.iter()),
+        }
+    }
+
     fn prefix(&self) -> &ModuleName {
         match self {
             Self::Typing(resolver) => &resolver.prefix,
@@ -328,7 +542,7 @@ impl<'db> TypingModeResolver<'db> {
         context: &ResolverContext<'db>,
         component_name: &str,
     ) -> Option<ResolvedNames<'db>> {
-        let name = full_module_name(Some(&self.prefix), component_name)?;
+        let name = ModuleName::new(component_name)?;
 
         // First phase: attempt to resolve the child through a stub override in extra paths.
         let stub_override = advance_candidates(
@@ -354,6 +568,15 @@ impl<'db> TypingModeResolver<'db> {
             false,
         );
         (!candidates.is_empty()).then_some(candidates)
+    }
+
+    fn candidates(
+        &self,
+        context: &ResolverContext<'db>,
+    ) -> impl Iterator<Item = &ModuleResolutionCandidate<'db>> {
+        self.stub_override_candidates
+            .iter()
+            .chain(self.full_search_candidates(context))
     }
 
     /// Returns module candidates for the full search, initializing the candidates
@@ -433,7 +656,7 @@ impl<'db> RuntimeModeResolver<'db> {
         context: &ResolverContext<'db>,
         component_name: &str,
     ) -> Option<ResolvedNames<'db>> {
-        let name = full_module_name(Some(&self.prefix), component_name)?;
+        let name = ModuleName::new(component_name)?;
         let candidates = advance_candidates(
             context,
             self.candidates.clone(),
