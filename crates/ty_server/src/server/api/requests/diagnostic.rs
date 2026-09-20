@@ -38,6 +38,7 @@ impl BackgroundDocumentRequestHandler for DocumentDiagnosticRequestHandler {
         }
 
         let diagnostics = snapshot
+            .document()
             .to_notebook_or_file(db)
             .and_then(|file| compute_diagnostics(db, file, snapshot.encoding()));
 
@@ -69,7 +70,7 @@ impl BackgroundDocumentRequestHandler for DocumentDiagnosticRequestHandler {
                             snapshot.resolved_client_capabilities(),
                             snapshot.global_settings(),
                         )
-                        .into_document_diagnostics(snapshot.uri()),
+                        .into_document_diagnostics(snapshot.document().uri()),
                 },
             }
             .into(),
