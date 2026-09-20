@@ -868,20 +868,19 @@ fn full_module_name(prefix: Option<&ModuleName>, component_name: &str) -> Option
 
 #[cfg(test)]
 mod tests {
-    use ruff_db::Db as _;
-    use ruff_db::system::{DbWithWritableSystem, SystemPath, SystemPathBuf};
+    use std::borrow::Cow;
+
+    use ruff_db::system::SystemPath;
 
     use crate::db::tests::TestDb;
     use crate::resolve::ModuleResolveMode;
-    use crate::settings::SearchPathSettings;
-    use crate::strategy::FallibleStrategy;
-    use crate::testing::TestCaseBuilder;
+    use crate::testing::enumeration_db;
 
     use super::{ModuleSearchCursor, ResolverContext};
 
     #[test]
     fn module_search_can_be_reused_across_sibling_module_resolutions() {
-        let db = search_db(
+        let db = enumeration_db(
             &["/src/acme/reports.py", "/site-packages/acme/tools.py"],
             &[],
         );
@@ -901,7 +900,7 @@ mod tests {
 
     #[test]
     fn sibling_modules_can_be_resolved_correctly_in_any_order() {
-        let db = search_db(
+        let db = enumeration_db(
             &[
                 "/extra/acme/patched.pyi",
                 "/src/acme/__init__.py",
@@ -928,7 +927,7 @@ mod tests {
 
     #[test]
     fn module_resolution_does_not_affect_nested_package_searches() {
-        let db = search_db(
+        let db = enumeration_db(
             &[
                 "/extra/acme/tools/patched.pyi",
                 "/src/acme/__init__.py",
@@ -957,29 +956,6 @@ mod tests {
         }
     }
 
-    fn search_db(paths: &[&str], extra_paths: &[&str]) -> TestDb {
-        let mut db = TestCaseBuilder::new().build().db;
-        db.write_files(paths.iter().map(|path| (*path, "")))
-            .expect("write search fixtures");
-        let settings = SearchPathSettings {
-            src_roots: vec![SystemPathBuf::from("/src")],
-            site_packages_paths: vec![SystemPathBuf::from("/site-packages")],
-            custom_typeshed: Some(SystemPathBuf::from("/typeshed")),
-            extra_paths: extra_paths
-                .iter()
-                .copied()
-                .map(SystemPathBuf::from)
-                .collect(),
-            ..SearchPathSettings::empty()
-        };
-        db.set_search_paths(
-            settings
-                .to_search_paths(db.system(), db.vendored(), &FallibleStrategy)
-                .expect("configure search fixtures"),
-        );
-        db
-    }
-
     fn assert_resolves_to(
         db: &TestDb,
         search: &ModuleSearchCursor,
@@ -993,7 +969,7 @@ mod tests {
             .resolve_child(component)
             .and_then(|candidates| candidates.into_iter().next())
             .expect("child resolves");
-        let module = candidate.into_module(db, db.resolver_environment(), &name);
+        let module = candidate.into_module(db, db.resolver_environment(), Cow::Owned(name));
         let file = module.file(db).expect("child has a defining file");
         assert_eq!(
             file.path(db).as_system_path(),
