@@ -29,6 +29,7 @@ unnecessary_map_or = "allow"
 
 [lib]
 name = "unicode_names2"
-# Upstream unit tests and macro doctests require nightly Rust.
+# Upstream unit tests, benchmarks, and macro doctests require nightly Rust.
 test = false
 doctest = false
+bench = false
