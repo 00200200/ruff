@@ -3083,7 +3083,7 @@ impl<'db> PathBoundBuilder<'db> {
 }
 
 /// The result of selecting a type for one typevar on one constraint path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PathBoundSolution<'db> {
     Solved(Type<'db>),
     /// The path provides no type to infer for this variable.
@@ -3093,13 +3093,7 @@ pub(crate) enum PathBoundSolution<'db> {
     /// The path does not satisfy the typevar's declared upper bound
     ViolatesDeclaredUpperBound,
     /// The path does not satisfy the typevar's declared constraints.
-    ///
-    /// The argument is the evidence to report. It is `None` if intersecting upper-bound evidence
-    /// exceeds the type-construction budget; the declaration violation is still known.
-    ViolatesDeclaredConstraints {
-        argument: Option<Type<'db>>,
-        direction: ConstraintFailureDirection,
-    },
+    ViolatesDeclaredConstraints(ConstraintFailureEvidence<'db>),
     /// Computing the solution exceeded the type-construction budget. A previously known type
     /// can still be used as a conservative fallback, but is not a complete solution.
     BudgetExceeded {
@@ -3118,20 +3112,20 @@ impl<'db> PathBoundSolution<'db> {
             Self::Unsolved
             | Self::Unsatisfiable
             | Self::ViolatesDeclaredUpperBound
-            | Self::ViolatesDeclaredConstraints { .. } => self,
+            | Self::ViolatesDeclaredConstraints(_) => self,
         }
     }
 
     /// Returns the selected type, including a fallback when the budget was exceeded.
     /// Match the outcome directly when completeness or the reason no type was selected matters.
-    pub(crate) fn as_type(self) -> Option<Type<'db>> {
+    pub(crate) fn as_type(&self) -> Option<Type<'db>> {
         match self {
-            Self::Solved(ty) => Some(ty),
+            Self::Solved(ty) => Some(*ty),
             Self::Unsolved
             | Self::Unsatisfiable
             | Self::ViolatesDeclaredUpperBound
-            | Self::ViolatesDeclaredConstraints { .. } => None,
-            Self::BudgetExceeded { fallback } => fallback,
+            | Self::ViolatesDeclaredConstraints(_) => None,
+            Self::BudgetExceeded { fallback } => *fallback,
         }
     }
 }
@@ -3712,21 +3706,16 @@ impl<'db> CandidateSolutions<'db> {
                 PathBoundSolution::ViolatesDeclaredUpperBound => {
                     violations.push(SolutionViolation {
                         bound_typevar: path_bound.bound_typevar,
-                        argument: path_bound.evidence_lower(),
                         variance: path_bound.variance(),
-                        kind: SolutionViolationKind::UpperBound,
+                        kind: SolutionViolationKind::UpperBound(path_bound.evidence_lower()),
                     });
                     None
                 }
-                PathBoundSolution::ViolatesDeclaredConstraints {
-                    argument,
-                    direction,
-                } => {
+                PathBoundSolution::ViolatesDeclaredConstraints(evidence) => {
                     violations.push(SolutionViolation {
                         bound_typevar: path_bound.bound_typevar,
-                        argument,
                         variance: path_bound.variance(),
-                        kind: SolutionViolationKind::Constraints(direction),
+                        kind: SolutionViolationKind::Constraints(evidence),
                     });
                     None
                 }
@@ -3988,10 +3977,9 @@ impl<'db> CandidateSolutions<'db> {
                                 .is_never_satisfied(db, env)
                         })
                     {
-                        return PathBoundSolution::ViolatesDeclaredConstraints {
-                            argument: Some(lower),
-                            direction: ConstraintFailureDirection::Lower,
-                        };
+                        return PathBoundSolution::ViolatesDeclaredConstraints(
+                            ConstraintFailureEvidence::Lower(lower),
+                        );
                     }
 
                     if path_bound.has_upper_evidence()
@@ -4007,14 +3995,11 @@ impl<'db> CandidateSolutions<'db> {
                                 .is_never_satisfied(db, env)
                         })
                     {
-                        return PathBoundSolution::ViolatesDeclaredConstraints {
-                            argument: IntersectionType::bounded_from_elements(
-                                db,
-                                env,
-                                path_bound.upper.iter_evidence(),
+                        return PathBoundSolution::ViolatesDeclaredConstraints(
+                            ConstraintFailureEvidence::Upper(
+                                path_bound.upper.iter_evidence().collect(),
                             ),
-                            direction: ConstraintFailureDirection::Upper,
-                        };
+                        );
                     }
 
                     return PathBoundSolution::Unsatisfiable;
@@ -4550,27 +4535,41 @@ impl<'db> SolutionPaths<'db> {
     }
 }
 
-/// The inferred bound that independently rejects every declared constraint.
+/// The inferred evidence that independently rejects every declared constraint.
 ///
 /// This is separate from path variance: an invariant path can fail because of either bound.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(crate) enum ConstraintFailureDirection {
-    Lower,
-    Upper,
+#[derive(Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
+pub(crate) enum ConstraintFailureEvidence<'db> {
+    Lower(Type<'db>),
+    /// These bounds must all hold on one path. Keep them separate so diagnostics can explain
+    /// contradictory bounds without replacing them with `Never` or expanding intersections.
+    Upper(Box<[Type<'db>]>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(crate) enum SolutionViolationKind {
-    UpperBound,
-    Constraints(ConstraintFailureDirection),
+#[derive(Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
+pub(crate) enum SolutionViolationKind<'db> {
+    UpperBound(Option<Type<'db>>),
+    Constraints(ConstraintFailureEvidence<'db>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) struct SolutionViolation<'db> {
     pub(crate) bound_typevar: BoundTypeVarInstance<'db>,
-    pub(crate) argument: Option<Type<'db>>,
     pub(crate) variance: TypeVarVariance,
-    pub(crate) kind: SolutionViolationKind,
+    pub(crate) kind: SolutionViolationKind<'db>,
+}
+
+impl<'db> SolutionViolation<'db> {
+    /// Returns the retained evidence types without constructing an intersection of upper bounds.
+    fn evidence_types(&self) -> &[Type<'db>] {
+        match &self.kind {
+            SolutionViolationKind::UpperBound(argument) => argument.as_slice(),
+            SolutionViolationKind::Constraints(ConstraintFailureEvidence::Lower(lower)) => {
+                std::slice::from_ref(lower)
+            }
+            SolutionViolationKind::Constraints(ConstraintFailureEvidence::Upper(upper)) => upper,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
@@ -5689,9 +5688,8 @@ mod tests {
                 Some(bytes),
                 bytes,
                 Some((
-                    bytes,
                     TypeVarVariance::Invariant,
-                    SolutionViolationKind::Constraints(ConstraintFailureDirection::Lower),
+                    SolutionViolationKind::Constraints(ConstraintFailureEvidence::Lower(bytes)),
                 )),
             ),
             (
@@ -5699,9 +5697,10 @@ mod tests {
                 None,
                 bool,
                 Some((
-                    bool,
                     TypeVarVariance::Covariant,
-                    SolutionViolationKind::Constraints(ConstraintFailureDirection::Upper),
+                    SolutionViolationKind::Constraints(ConstraintFailureEvidence::Upper(Box::new(
+                        [bool],
+                    ))),
                 )),
             ),
             (
@@ -5709,9 +5708,10 @@ mod tests {
                 Some(bool),
                 bool,
                 Some((
-                    bool,
                     TypeVarVariance::Invariant,
-                    SolutionViolationKind::Constraints(ConstraintFailureDirection::Upper),
+                    SolutionViolationKind::Constraints(ConstraintFailureEvidence::Upper(Box::new(
+                        [bool],
+                    ))),
                 )),
             ),
             (
@@ -5719,9 +5719,8 @@ mod tests {
                 Some(str),
                 int,
                 Some((
-                    str,
                     TypeVarVariance::Invariant,
-                    SolutionViolationKind::UpperBound,
+                    SolutionViolationKind::UpperBound(Some(str)),
                 )),
             ),
         ] {
@@ -5736,11 +5735,10 @@ mod tests {
                 typevars: Box::new([bounds.finish(db, &env, typevar)]),
             }]));
             let expected = expected_violation
-                .map(|(argument, variance, kind)| Solution {
+                .map(|(variance, kind)| Solution {
                     solved_typevars: vec![],
                     validity: SolutionValidity::Invalid(Box::new([SolutionViolation {
                         bound_typevar: typevar,
-                        argument: Some(argument),
                         variance,
                         kind,
                     }])),
@@ -5796,10 +5794,9 @@ mod tests {
                         solved_typevars: vec![],
                         validity: SolutionValidity::Invalid(Box::new([SolutionViolation {
                             bound_typevar: t,
-                            argument: Some(bytes),
                             variance: TypeVarVariance::Invariant,
                             kind: SolutionViolationKind::Constraints(
-                                ConstraintFailureDirection::Lower,
+                                ConstraintFailureEvidence::Lower(bytes),
                             ),
                         }])),
                     });
@@ -5904,10 +5901,7 @@ mod tests {
                 inferable,
                 &bounds.finish(db, &env, t)
             ),
-            PathBoundSolution::ViolatesDeclaredConstraints {
-                argument: Some(lower),
-                direction: ConstraintFailureDirection::Lower,
-            }
+            PathBoundSolution::ViolatesDeclaredConstraints(ConstraintFailureEvidence::Lower(lower))
         );
     }
 
@@ -5998,7 +5992,7 @@ class E: ...
             let expected = PathBoundSolution::BudgetExceeded { fallback: lower };
             assert_eq!(
                 CandidateSolutions::preliminary_solve(db, &env, &builder, inferable, &exhausted),
-                lower.map_or(expected, PathBoundSolution::Solved)
+                lower.map_or_else(|| expected.clone(), PathBoundSolution::Solved)
             );
             assert_eq!(
                 CandidateSolutions::default_solve(db, &env, &builder, inferable, &exhausted),
@@ -6087,8 +6081,8 @@ class E: ...
         );
 
         // Without the gradual alternatives, the upper bounds exclude every declared constraint.
-        // This violation is known even though constructing its diagnostic evidence exceeds the
-        // budget, so the invalid solution is complete.
+        // Keeping those bounds separate preserves the diagnostic evidence without constructing
+        // an intersection that would exceed the budget.
         let mut bounds = PathBoundBuilder::default();
         for upper in [left, right] {
             bounds.add_upper(ConstraintProvenance::Evidence, upper);
@@ -6096,10 +6090,9 @@ class E: ...
         let rejected = bounds.finish(db, &env, constrained);
         assert_eq!(
             CandidateSolutions::preliminary_solve(db, &env, &builder, inferable, &rejected),
-            PathBoundSolution::ViolatesDeclaredConstraints {
-                argument: None,
-                direction: ConstraintFailureDirection::Upper,
-            }
+            PathBoundSolution::ViolatesDeclaredConstraints(ConstraintFailureEvidence::Upper(
+                Box::new([left, right]),
+            ))
         );
         let candidates = CandidateSolutions::Constrained(Box::new([CandidateSolution {
             typevars: Box::new([rejected]),
@@ -6110,9 +6103,10 @@ class E: ...
                 solved_typevars: vec![],
                 validity: SolutionValidity::Invalid(Box::new([SolutionViolation {
                     bound_typevar: constrained,
-                    argument: None,
                     variance: TypeVarVariance::Covariant,
-                    kind: SolutionViolationKind::Constraints(ConstraintFailureDirection::Upper),
+                    kind: SolutionViolationKind::Constraints(ConstraintFailureEvidence::Upper(
+                        Box::new([left, right]),
+                    )),
                 }])),
             }]))
         );
