@@ -86,6 +86,7 @@ mod string;
 mod token_set;
 mod token_source;
 pub mod typing;
+mod unicode_names;
 
 /// Parse a full Python module usually consisting of multiple lines.
 ///

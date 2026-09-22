@@ -8,6 +8,7 @@ use ruff_python_ast::{self as ast, AnyStringFlags, AtomicNodeIndex, Expr, String
 use ruff_text_size::{Ranged, TextRange, TextSize};
 
 use crate::error::{LexicalError, LexicalErrorType};
+use crate::unicode_names;
 
 #[derive(Debug)]
 pub(crate) enum StringType {
@@ -223,7 +224,7 @@ impl<'src> StringParser<'src> {
         let name_and_ending = self.skip_bytes(close_idx + 1);
         let name = &name_and_ending[..name_and_ending.len() - 1];
 
-        unicode_names2::character(name).ok_or_else(|| {
+        unicode_names::character(name).ok_or_else(|| {
             LexicalError::new(
                 LexicalErrorType::UnicodeError,
                 // The cursor is right after the `}` character, so we subtract 1 to get the correct

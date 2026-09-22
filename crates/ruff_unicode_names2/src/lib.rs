@@ -29,7 +29,7 @@
 //!   sequences cannot be customised, so the extra backslash (or a raw
 //!   string) is required, unless you use a raw string.
 //!
-//! ```rust
+//! ```rust,ignore
 //! #![feature(proc_macro_hygiene)]
 //!
 //! #[macro_use]
@@ -68,7 +68,7 @@
 //! [`is_ascii_whitespace`]: char::is_ascii_whitespace
 
 #![cfg_attr(feature = "no_std", no_std)]
-#![cfg_attr(test, feature(test))]
+#![cfg_attr(all(test, not(clippy)), feature(test))]
 #![deny(missing_docs, unsafe_code)]
 
 #[cfg(all(test, feature = "no_std"))]
@@ -503,7 +503,7 @@ fn normalise_name(search_name: &str, buf: &mut [u8; LONGEST_NAME_LEN]) -> usize 
     cursor
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(clippy)))]
 mod tests {
     use super::*;
     use rand::{
