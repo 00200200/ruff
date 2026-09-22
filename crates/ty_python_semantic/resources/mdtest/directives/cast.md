@@ -177,13 +177,13 @@ def cast_generic(
     dynamic_list_of_integers: Intersection[list[int], Any],
     list_of_dynamic_integers: list[Intersection[int, Any]],
 ) -> None:
-    # error: [disjoint-cast] "Cast from `list[int]` to disjoint type `list[str]`"
+    # error: [disjoint-cast-strict] "Cast from `list[int]` to disjoint type `list[str]`"
     cast(list[str], list_of_integers)
-    # error: [disjoint-cast]
+    # error: [disjoint-cast-strict]
     cast(list[str], list_of_integers_or_any)
-    # error: [disjoint-cast]
+    # error: [disjoint-cast-strict]
     cast(list[str], dynamic_list_of_integers)
-    # error: [disjoint-cast]
+    # error: [disjoint-cast-strict]
     cast(list[str], list_of_dynamic_integers)
 ```
 
@@ -264,12 +264,12 @@ overlap. The explanation identifies the invariant parameter and the failed subty
 from typing import cast
 
 def narrow_elements(values: list[int | str]) -> None:
-    # snapshot: disjoint-cast
+    # snapshot: disjoint-cast-strict
     cast(list[int], values)
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+info[disjoint-cast-strict]: Cast to a disjoint type
     --> src/mdtest_snippet.py:5:5
      |
    5 |     cast(list[int], values)
@@ -313,7 +313,7 @@ def cast_function(function: Function) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:17:5
    |
 17 |       cast(Named, function)
@@ -344,12 +344,12 @@ contributes its own explanation.
 from typing import cast
 
 def cast_union(value: list[str] | list[bytes]) -> None:
-    # snapshot: disjoint-cast
+    # snapshot: disjoint-cast-strict
     cast(list[int], value)
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+info[disjoint-cast-strict]: Cast to a disjoint type
     --> src/mdtest_snippet.py:5:5
      |
    5 |     cast(list[int], value)
@@ -382,7 +382,7 @@ def cast_tuple(value: tuple[int, str]) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
     --> src/mdtest_snippet.py:5:5
      |
    5 |     cast(tuple[int, int], value)
@@ -413,7 +413,7 @@ def cast_tuple(value: tuple[int]) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
     --> src/mdtest_snippet.py:5:5
      |
    5 |     cast(tuple[int, int], value)
@@ -452,7 +452,7 @@ def cast_protocol(value: Source) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:13:5
    |
 13 |       cast(Target, value)
@@ -485,7 +485,7 @@ def cast_final(value: Target) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:16:5
    |
 16 |       cast(Source, value)
@@ -531,7 +531,7 @@ def cast_protocol(value: Source) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:13:5
    |
 13 |       cast(Target, value)
@@ -575,7 +575,7 @@ def cast_fields(value: Source) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:11:5
    |
 11 |     cast(Target, value)
@@ -618,7 +618,7 @@ def cast_fields(value: Source) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:12:5
    |
 12 |     cast(Target, value)
@@ -648,7 +648,7 @@ def cast_required(value: Target) -> None:
 ```
 
 ```snapshot
-info[disjoint-cast]: Cast to a disjoint type
+warning[disjoint-cast]: Cast to a disjoint type
   --> src/mdtest_snippet.py:15:5
    |
 15 |     cast(Source, value)

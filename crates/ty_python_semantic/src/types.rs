@@ -2795,6 +2795,15 @@ impl<'db> Type<'db> {
         )
     }
 
+    fn discard_specialization(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+        self.apply_type_mapping(
+            db,
+            env,
+            &TypeMapping::DiscardSpecialization,
+            TypeContext::default(),
+        )
+    }
+
     fn has_dynamic(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> bool {
         any_over_type(db, env, self, false, |ty| ty.is_dynamic())
     }
@@ -9494,6 +9503,7 @@ impl<'db> Type<'db> {
                 | TypeMapping::EagerExpansion
                 | TypeMapping::RescopeReturnCallables(_)
                 | TypeMapping::Promote(PromotionMode::Off, _)
+                | TypeMapping::DiscardSpecialization
                 | TypeMapping::Promote(
                     PromotionMode::On,
                     PromotionKind::ClassLiteralsOnly | PromotionKind::SingletonsOnly,
@@ -9513,6 +9523,7 @@ impl<'db> Type<'db> {
                 | TypeMapping::ReplaceSelf { .. }
                 | TypeMapping::Promote(..)
                 | TypeMapping::ReplaceParameterDefaults
+                | TypeMapping::DiscardSpecialization
                 | TypeMapping::EagerExpansion
                 | TypeMapping::RescopeReturnCallables(_) => self,
                 TypeMapping::Materialize(materialization_kind) => match materialization_kind {
@@ -10801,7 +10812,9 @@ pub enum TypeMapping<'a, 'db> {
     /// Binds any `typing.Self` typevar with a particular `self` class.
     BindSelf(SelfBinding<'db>),
     /// Replaces occurrences of `typing.Self` with a new `Self` type variable with the given upper bound.
-    ReplaceSelf { new_upper_bound: Type<'db> },
+    ReplaceSelf {
+        new_upper_bound: Type<'db>,
+    },
     /// Create the top or bottom materialization of a type.
     Materialize(MaterializationKind),
     /// Replace default types in parameters of callables with `Unknown`. This is used to avoid infinite
@@ -10810,6 +10823,7 @@ pub enum TypeMapping<'a, 'db> {
     /// Apply eager expansion to the type.
     /// In the case of recursive type aliases, this will diverge, so that part will be replaced with `Divergent`.
     EagerExpansion,
+    DiscardSpecialization,
 
     /// Updates any `Callable` types in a function signature return type to be generic if possible.
     RescopeReturnCallables(&'a FxHashMap<CallableType<'db>, CallableType<'db>>),
@@ -10872,6 +10886,7 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::Materialize(_)
             | TypeMapping::ReplaceParameterDefaults
             | TypeMapping::EagerExpansion
+            | TypeMapping::DiscardSpecialization
             | TypeMapping::RescopeReturnCallables(_) => context,
             TypeMapping::BindSelf(binding) => {
                 if binding.binding_context().is_some() {
@@ -10920,6 +10935,7 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::ReplaceSelf { .. }
             | TypeMapping::ReplaceParameterDefaults
             | TypeMapping::EagerExpansion
+            | TypeMapping::DiscardSpecialization
             | TypeMapping::RescopeReturnCallables(_) => self.clone(),
         }
     }
